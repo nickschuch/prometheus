@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/tools/clientcmd"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
@@ -115,6 +116,7 @@ type SDConfig struct {
 	HTTPClientConfig   config.HTTPClientConfig `yaml:",inline"`
 	NamespaceDiscovery NamespaceDiscovery      `yaml:"namespaces,omitempty"`
 	Selectors          []SelectorConfig        `yaml:"selectors,omitempty"`
+	Kubeconfig         string                  `yaml:"kubeconfig,omitempty"`
 }
 
 // Name returns the name of the Config.
@@ -250,27 +252,9 @@ func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
 	if l == nil {
 		l = log.NewNopLogger()
 	}
-	var (
-		kcfg *rest.Config
-		err  error
-	)
-	if conf.APIServer.URL == nil {
-		// Use the Kubernetes provided pod service account
-		// as described in https://kubernetes.io/docs/admin/service-accounts-admin/
-		kcfg, err = rest.InClusterConfig()
-		if err != nil {
-			return nil, err
-		}
-		level.Info(l).Log("msg", "Using pod service account via in-cluster config")
-	} else {
-		rt, err := config.NewRoundTripperFromConfig(conf.HTTPClientConfig, "kubernetes_sd", false, false)
-		if err != nil {
-			return nil, err
-		}
-		kcfg = &rest.Config{
-			Host:      conf.APIServer.String(),
-			Transport: rt,
-		}
+	kcfg, err := getConfig(l, conf)
+	if err != nil {
+		return nil, err
 	}
 
 	kcfg.UserAgent = userAgent
@@ -286,6 +270,37 @@ func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
 		namespaceDiscovery: &conf.NamespaceDiscovery,
 		discoverers:        make([]discovery.Discoverer, 0),
 		selectors:          mapSelector(conf.Selectors),
+	}, nil
+}
+
+func getConfig(l log.Logger, conf *SDConfig) (*rest.Config, error) {
+	if conf.Kubeconfig != "" {
+		return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			&clientcmd.ClientConfigLoadingRules{ExplicitPath: conf.Kubeconfig},
+			&clientcmd.ConfigOverrides{}).ClientConfig()
+	}
+
+	if conf.APIServer.URL == nil {
+		// Use the Kubernetes provided pod service account
+		// as described in https://kubernetes.io/docs/admin/service-accounts-admin/
+		kcfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		level.Info(l).Log("msg", "Using pod service account via in-cluster config")
+
+		return kcfg, nil
+	}
+
+	rt, err := config.NewRoundTripperFromConfig(conf.HTTPClientConfig, "kubernetes_sd", false, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &rest.Config{
+		Host:      conf.APIServer.String(),
+		Transport: rt,
 	}, nil
 }
 
